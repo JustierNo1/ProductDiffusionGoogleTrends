@@ -1,0 +1,111 @@
+---
+title: "Van den Bulte and Joshi Model of Product Diffusion using Google Trends"
+author: "Patrick Glettig"
+date: "06 May 2018"
+output: html_document
+runtime: shiny
+---
+
+To learn more, see [Interactive Documents](http://rmarkdown.rstudio.com/authoring_shiny.html).
+
+## Set different Parameters and remodel shape
+
+Remake the graphs from page 7 and 9 by using shiny apps.
+
+```{r eruptions, echo=FALSE}
+inputPanel(
+  selectInput("n_breaks", label = "Number of bins:",
+              choices = c(10, 20, 35, 50), selected = 20),
+  
+  sliderInput("bw_adjust", label = "Bandwidth adjustment:",
+              min = 0.2, max = 2, value = 1, step = 0.2)
+)
+
+renderPlot({
+  hist(faithful$eruptions, probability = TRUE, breaks = as.numeric(input$n_breaks),
+       xlab = "Duration (minutes)", main = "Geyser eruption duration")
+  
+  dens <- density(faithful$eruptions, adjust = input$bw_adjust)
+  lines(dens, col = "blue")
+})
+```
+
+## Embedded Application
+
+
+In all of R code chunks above the `echo = FALSE` attribute is used. This is to prevent the R code within the chunk from rendering in the document alongside the Shiny components.
+
+## Data
+We use Google trends and take it as a proxy for product adoption/diffusion. The R-Package `gtrendsR`helps us with this:
+```{R}
+library(gtrendsR)
+library(reshape2)
+library(ggplot2)
+
+#Set system time
+Sys.setenv(TZ = "UTC")
+
+#Retrieve Data
+google.trends = gtrends(c("blu-ray"), gprop = "web", time = "all")[[1]]
+google.trends = google.trends[,c("date","hits")]
+google.trends$times = seq_along(google.trends$hits)
+```
+```{R, echo = FALSE}
+#Plot Data
+ggplot(data=google.trends, aes(x= date, y = hits))+
+  geom_line()+
+  scale_x_date(date_labels = "%b-%Y")+
+  xlab("")+
+  ylab("Monthly Views")
+```
+
+
+## Parameter Estimates
+
+Estimate AIM through direct integration, that is, by computing nonlinear least-squares estimates solving this equation, plugging in $f_2$:
+$$
+\begin{aligned}
+dX(t)/dt&=M[\theta f_1(t)+(1-\theta)f_2(t)]+\varepsilon(t) \\
+&=M\left[\theta f_1(t)+(1-\theta)q_2\left\{wF_1(t)+(1-w)\frac{X(t)/M-\theta F_1(t)}{1-\theta}\right\}*\left\{1-\frac{X(t)/M-\theta F_1(t)}{1-\theta}\right\}\right]+\varepsilon(t)
+\end{aligned}
+$$
+We can solve this equation using deSolve.
+```{r}
+library(deSolve)
+```
+Error term allowed up to order 1, serial correlation allowed or Durbin-Watson statistic outside 1.5-2.5 range. Parameters $p_1, q_1, p_2 ,q_2$ nonnegative $(\geq 0)$ and that $0 \geq \theta \geq 1$. Because hazard rates can be larger than one in continuous time, we do not impose $p_1, q_1 ,p_2, q_2 \leq 0$. As to $w$, we impose $0.01\% \leq w \leq 1$, choosing a very small but positive lower bound so the model itself ensures the "seeding" of the contagion process among imitators even when $p_2 = 0$.
+
+**Restrictions**
+$$
+p_1, q_1, p_2 ,q_2 \geq 0 \\
+0 \geq \theta \geq 1 \\
+0.01\% \leq w \leq 1 \\
+$$
+Because estimation through direct integration fits the cumulative adoptions $X(t)$ rather than the periodic adoptions $X(t)-X(t-1)$, the $R^2$ values are often exremely high and noninformative. Therefore, we report the mean absolute percentage error (MAPE) instead, as well as the squared Pearson correlation between the actual periodic adoptions and the difference in predicted cumulative adoptions $(R^2_p)$.
+
+### Non-linear least-squared Parameter Estimation
+We use the approach suggested in [First steps with Non-Linear Regression in R](https://www.r-bloggers.com/first-steps-with-non-linear-regression-in-r/).
+Now R has a built-in function to estimate starting values for the parameter of a logistic equation (SSlogis) but it uses the following equation:
+$$ N_{t} = \frac{\alpha}{1+e^{\frac{\bar{x}-t}{scale}}} $$
+
+```{R, eval = FALSE}
+SS <- getInitial(hits~SSlogis(times,alpha,xmid,scale),
+           data=google.trends)
+```
+We use the function getInitial which gives some initial guesses about the parameter values based on the data. We pass to this function a selfStarting model (SSlogis) which takes as argument an input vector (the t values where the function will be evaluated), and the un-quoted name of the three parameter for the logistic equation. 
+However as the SSlogis use a different parametrization we need to use a bit of algebra to go from the estimated self-starting values returned from SSlogis to the one that are in the equation we want to use. 
+```{R, eval = FALSE}
+#we used a different parametrization
+K_start<-SS["alpha"]
+R_start<-1/SS["scale"]
+N0_start<-SS["alpha"]/(exp(SS["xmid"]/SS["scale"])+1)
+#the formula for the model
+log_formula<-formula(N_obs~K*N0*exp(R*times)/(K+N0*(exp(R*times)-1)))
+#fit the model
+m<-nls(log_formula,start=list(K=K_start,R=R_start,N0=N0_start))
+#estimated parameters
+summary(m)
+
+#get some estimation of goodness of fit
+cor(N_obs,predict(m))
+```
